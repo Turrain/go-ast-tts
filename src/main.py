@@ -283,7 +283,7 @@ async def process_tts_stream(sentence_queue, language, speed, websocket):
                     # Optionally, print the sending part size
                     # print(f"Sending audio part of size: {len(part)} bytes")
                     await websocket.send_bytes(part)
-                    await asyncio.sleep(0.020)
+                    await asyncio.sleep(0.015)
             
             logging.info(f"Finished streaming for: {text}")
         
