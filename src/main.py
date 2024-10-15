@@ -12,6 +12,14 @@ from scipy.signal import resample
 from TTS.tts.configs.xtts_config import XttsConfig
 from TTS.tts.models.xtts import Xtts
 from huggingface_hub import snapshot_download
+import logging
+logging.basicConfig(
+ #   filename='app.log',  # Log file name
+    level=logging.INFO,  # Log level
+    format='%(asctime)s - %(levelname)s - %(message)s'  # Log format
+)
+
+
 
 # Global variables for the model and conditioning parameters
 model = None
@@ -208,7 +216,7 @@ async def websocket_endpoint(websocket: WebSocket):
             language = data.get('language', 'ru')  # Default to Russian
             speed = data.get('speed', 1.0)
             # Add other TTS settings as needed
-
+            logging.info(f"Received message: {message}")
             if not message:
                 await websocket.send_json({"error": "No message provided."})
                 continue
@@ -218,7 +226,7 @@ async def websocket_endpoint(websocket: WebSocket):
             for chunk in text_chunks:
                 await sentence_queue.put(chunk)
 
-            print(f"Enqueued {len(text_chunks)} text chunks.")
+            logging.info(f"Enqueued {len(text_chunks)} text chunks.")
             # If a previous processing task is running, cancel it
             if processing_task and not processing_task.done():
                 processing_task.cancel()
@@ -229,9 +237,9 @@ async def websocket_endpoint(websocket: WebSocket):
             )
 
     except WebSocketDisconnect:
-        print("WebSocket disconnected")
+        logging.info("WebSocket disconnected")
     except Exception as e:
-        print(f"Error: {e}")
+        logging.error(f"Error: {e}")
         await websocket.send_json({"error": f"Internal server error: {str(e)}"})
     finally:
         if processing_task and not processing_task.done():
@@ -259,14 +267,14 @@ async def process_tts_stream(sentence_queue, language, speed, websocket):
                 speaker_embedding=speaker_embedding,
                 speed=speed
             )
-            print(f"Streaming TTS started for: {text}")
+            logging.info(f"Streaming TTS started for: {text}")
             for chunk in chunks:
                 # Convert the chunk tensor to numpy array
                 chunk_np = chunk.cpu().numpy().squeeze().astype('float32')
                 
                 # Convert numpy array to bytes
                 audio_bytes = convert_float32_to_pcm(chunk_np, 24000, 8000)
-                print(f"Generated audio chunk of size: {len(audio_bytes)} bytes")
+                logging.info(f"Generated audio chunk of size: {len(audio_bytes)} bytes")
 
                 # Split and send the audio chunk in parts if it exceeds the size limit
                 size_limit = 320
@@ -275,17 +283,18 @@ async def process_tts_stream(sentence_queue, language, speed, websocket):
                     # Optionally, print the sending part size
                     # print(f"Sending audio part of size: {len(part)} bytes")
                     await websocket.send_bytes(part)
+                    await asyncio.sleep(0.020)
             
-            print(f"Finished streaming for: {text}")
+            logging.info(f"Finished streaming for: {text}")
         
         # After processing all sentences, send 'end_of_audio'
         await websocket.send_json({"type": "end_of_audio"})
-        print("End of audio chunks sent.")
+        logging.info("End of audio chunks sent.")
 
     except asyncio.CancelledError:
-        print("TTS streaming task was cancelled.")
+        logging.info("TTS streaming task was cancelled.")
     except Exception as e:
-        print(f"Error during TTS processing: {e}")
+        logging.error(f"Error during TTS processing: {e}")
         await websocket.send_json({"error": f"Error during TTS processing: {str(e)}"})
 @app.get("/languages")
 async def get_languages():
