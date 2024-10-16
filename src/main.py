@@ -18,9 +18,9 @@ logging.basicConfig(
     level=logging.INFO,  # Log level
     format='%(asctime)s - %(levelname)s - %(message)s'  # Log format
 )
+ 
 
-
-
+ 
 # Global variables for the model and conditioning parameters
 model = None
 gpt_cond_latent = None
@@ -215,6 +215,8 @@ async def websocket_endpoint(websocket: WebSocket):
             message = data.get('message', '')
             language = data.get('language', 'ru')  # Default to Russian
             speed = data.get('speed', 1.0)
+            await_time = data.get('await_time', 0.015)
+
             # Add other TTS settings as needed
             logging.info(f"Received message: {message}")
             if not message:
@@ -233,7 +235,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
             # Start a new processing task with the text chunks
             processing_task = asyncio.create_task(
-                process_tts_stream(sentence_queue, language, speed, websocket)
+                process_tts_stream(sentence_queue, language, speed, await_time, websocket)
             )
 
     except WebSocketDisconnect:
@@ -246,7 +248,7 @@ async def websocket_endpoint(websocket: WebSocket):
             processing_task.cancel()
         await websocket.close()
 
-async def process_tts_stream(sentence_queue, language, speed, websocket):
+async def process_tts_stream(sentence_queue, language, speed, await_time, websocket):
     """
     Asynchronously process TTS inference from the sentence queue and send audio chunks via WebSocket.
 
@@ -283,7 +285,7 @@ async def process_tts_stream(sentence_queue, language, speed, websocket):
                     # Optionally, print the sending part size
                     # print(f"Sending audio part of size: {len(part)} bytes")
                     await websocket.send_bytes(part)
-                    await asyncio.sleep(0.015)
+                    await asyncio.sleep(await_time)
             
             logging.info(f"Finished streaming for: {text}")
         
