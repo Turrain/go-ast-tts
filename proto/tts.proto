@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package tts;
+
+service TTSService {
+    rpc StreamTTS(TTSRequest) returns (stream TTSResponse);
+}
+
+message TTSRequest {
+    string message = 1;
+    string language = 2;
+    float speed = 3;
+}
+
+message TTSResponse {
+    bytes audio_chunk = 1;
+    bool end_of_audio = 2;
+}

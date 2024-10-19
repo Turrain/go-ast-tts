@@ -149,7 +149,7 @@ async def startup_event():
     checkpoint_path = await download_model()
     model = await load_model(checkpoint_path)
     # Load conditioning latents (replace 'ref4.wav' with your reference audio file)
-    gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(audio_path=["ref4.wav"])
+    gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(audio_path=["ref5.wav"])
     print("Model is ready.")
 
 
@@ -279,13 +279,10 @@ async def process_tts_stream(sentence_queue, language, speed, await_time, websoc
                 logging.info(f"Generated audio chunk of size: {len(audio_bytes)} bytes")
 
                 # Split and send the audio chunk in parts if it exceeds the size limit
-                size_limit = 320
-                for i in range(0, len(audio_bytes), size_limit):
-                    part = audio_bytes[i:i + size_limit]
-                    # Optionally, print the sending part size
-                    # print(f"Sending audio part of size: {len(part)} bytes")
-                    await websocket.send_bytes(part)
-                    await asyncio.sleep(await_time)
+                
+               
+                await websocket.send_bytes(audio_bytes)
+            #    await asyncio.sleep(await_time)
             
             logging.info(f"Finished streaming for: {text}")
         
