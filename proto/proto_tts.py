@@ -126,7 +126,12 @@ class TTSService(tts_pb2_grpc.TTSServiceServicer):
         config.load_json(config_path)
         model = Xtts.init_from_config(config)
         model.load_checkpoint(config, checkpoint_dir=checkpoint_path)
-        model.cuda()
+        if torch.cuda.is_available():
+            logging.info("CUDA is available, moving model to GPU.")
+            model.cuda()
+        else:
+            logging.info("CUDA is not available, moving model to CPU.")
+            model.cpu()
         gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(audio_path=["ref5.wav"])
         logging.info("TTS Model loaded and ready.")
 
