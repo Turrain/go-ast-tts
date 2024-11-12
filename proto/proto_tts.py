@@ -12,7 +12,7 @@ from TTS.tts.models.xtts import Xtts
 from huggingface_hub import snapshot_download
 from scipy.signal import resample
 import re
-
+import threading
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -115,25 +115,58 @@ def convert_float32_to_pcm(input_audio, input_sample_rate=24000, target_sample_r
     # Return as bytes
     return pcm_audio.tobytes()
 
+class TTSModelPool:
+    """
+    Manages a pool of TTS models.
+    """
+    def __init__(self, pool_size=10):
+        self.pool_size = pool_size
+        self.models = [TTSModel() for _ in range(pool_size)]
+        self.available_models = set(range(pool_size))
+        self.lock = threading.Lock()
 
-class TTSService(tts_pb2_grpc.TTSServiceServicer):
+    def acquire_model(self):
+        with self.lock:
+            if self.available_models:
+                model_index = self.available_models.pop()
+                return self.models[model_index], model_index
+            else:
+                return None, None
+
+    def release_model(self, model_index):
+        with self.lock:
+            self.available_models.add(model_index)
+
+class TTSModel:
     def __init__(self):
-        global model, gpt_cond_latent, speaker_embedding
-        # Initialize the TTS model
+        self.model = None
+        self.gpt_cond_latent = None
+        self.speaker_embedding = None
+        self._load_model()
+
+    def _load_model(self):
+        logging.info("Loading TTS model...")
         checkpoint_path = snapshot_download("coqui/XTTS-v2")
         config_path = os.path.join(checkpoint_path, "config.json")
         config = XttsConfig()
         config.load_json(config_path)
-        model = Xtts.init_from_config(config)
-        model.load_checkpoint(config, checkpoint_dir=checkpoint_path)
-        if torch.cuda.is_available():
-            logging.info("CUDA is available, moving model to GPU.")
-            model.cuda()
-        else:
-            logging.info("CUDA is not available, moving model to CPU.")
-            model.cpu()
-        gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(audio_path=["ref5.wav"])
+     
+        self.model = Xtts.init_from_config(config)
+     
+        self.model.load_checkpoint(config, checkpoint_dir=checkpoint_path, use_deepspeed=True)
+        
+
+        logging.info("CUDA is available, moving model to GPU.")
+        self.model.cuda()
+       
+        self.gpt_cond_latent, self.speaker_embedding = self.model.get_conditioning_latents(audio_path=["ref5.wav"])
         logging.info("TTS Model loaded and ready.")
+
+
+class TTSService(tts_pb2_grpc.TTSServiceServicer):
+    def __init__(self, model_pool):
+        # Initialize the model singleton
+        self.model_pool = model_pool
 
     def StreamTTS(self, request_iterator, context):
         """
@@ -141,55 +174,65 @@ class TTSService(tts_pb2_grpc.TTSServiceServicer):
         Receives TTSRequest messages and yields TTSResponse messages.
         """
         # Check if request_iterator is actually a single request
+        tts_model, model_index = self.model_pool.acquire_model()
+        if tts_model is None:
+            context.set_details("All TTS models are busy.")
+            context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
+            return
+        
         if isinstance(request_iterator, tts_pb2.TTSRequest):
             request_iterator = [request_iterator]  # Convert to an iterable
+        try:
+            for request in request_iterator:
+                message = request.message
+                language = request.language
+                speed = request.speed
+                logging.info(f"Received TTS request: {message} (Language: {language}, Speed: {speed})")
 
-        for request in request_iterator:
-            message = request.message
-            language = request.language
-            speed = request.speed
-            logging.info(f"Received TTS request: {message} (Language: {language}, Speed: {speed})")
+                if not message:
+                    context.set_details("No message provided.")
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    continue
+                message_chunks = split_text_into_chunks(message)
+                # Split the message into chunks if necessary
+                # Implement chunking logic if needed
 
-            if not message:
-                context.set_details("No message provided.")
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                continue
-            message_chunks = split_text_into_chunks(message)
-            # Split the message into chunks if necessary
-            # Implement chunking logic if needed
+                try:
+                    # Perform TTS inference
+                    for chunk in message_chunks:
+                        # Perform TTS inference for each chunk
+                        with torch.no_grad():
+                            audio_chunks = tts_model.model.inference_stream(
+                                chunk,
+                                language=language,
+                                gpt_cond_latent=tts_model.gpt_cond_latent,
+                                speaker_embedding=tts_model.speaker_embedding,
+                                speed=speed
+                            )
 
-            try:
-                # Perform TTS inference
-                for chunk in message_chunks:
-                    # Perform TTS inference for each chunk
-                    with torch.no_grad():
-                        audio_chunks = model.inference_stream(
-                            chunk,
-                            language=language,
-                            gpt_cond_latent=gpt_cond_latent,
-                            speaker_embedding=speaker_embedding,
-                            speed=speed
-                        )
+                        logging.info(f"Streaming TTS for chunk: {chunk}")
 
-                    logging.info(f"Streaming TTS for chunk: {chunk}")
+                        for audio_chunk in audio_chunks:
+                            chunk_np = audio_chunk.cpu().numpy().squeeze().astype('float32')
+                            audio_bytes = convert_float32_to_pcm(chunk_np, 24000, 8000)
+                            yield tts_pb2.TTSResponse(audio_chunk=audio_bytes, end_of_audio=False)
 
-                    for audio_chunk in audio_chunks:
-                        chunk_np = audio_chunk.cpu().numpy().squeeze().astype('float32')
-                        audio_bytes = convert_float32_to_pcm(chunk_np, 24000, 8000)
-                        yield tts_pb2.TTSResponse(audio_chunk=audio_bytes, end_of_audio=False)
+                    # Indicate end of audio
+                    yield tts_pb2.TTSResponse(audio_chunk=b'', end_of_audio=True)
 
-                # Indicate end of audio
-                yield tts_pb2.TTSResponse(audio_chunk=b'', end_of_audio=True)
+                except Exception as e:
+                    logging.error(f"TTS processing error: {e}")
+                    context.set_details(str(e))
+                    context.set_code(grpc.StatusCode.INTERNAL)
+        finally:
+            self.model_pool.release_model(model_index)
 
-            except Exception as e:
-                logging.error(f"TTS processing error: {e}")
-                context.set_details(str(e))
-                context.set_code(grpc.StatusCode.INTERNAL)
-
-def serve():
+def serve(port):
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    tts_pb2_grpc.add_TTSServiceServicer_to_server(TTSService(), server)
-    server_address = '[::]:50051'
+    model_pool = TTSModelPool(pool_size=6)  
+   
+    tts_pb2_grpc.add_TTSServiceServicer_to_server(TTSService(model_pool), server)
+    server_address = f'[::]:{port}'
     server.add_insecure_port(server_address)
     logging.info(f"Starting gRPC server on {server_address}")
     server.start()
@@ -201,4 +244,8 @@ def serve():
         server.stop(0)
 
 if __name__ == "__main__":
-    serve()
+    import argparse
+    parser = argparse.ArgumentParser(description='Start the TTS gRPC server.')
+    parser.add_argument('--port', type=int, default=50051, help='Port number to listen on.')
+    args = parser.parse_args()
+    serve(args.port)
